@@ -1,13 +1,5 @@
 #!/bin/bash
 
-# Compile with:
-# g++ dummylib/dummylib.cpp -shared -fpic -o libdummy.so -std=c++17
-# g++ dummyproc.cpp -L. -ldummy -ldl -o dummyproc -std=c++17
-# gcc dynhooklib.c -shared -fpic -o dynhooklib.so
-
-# Run main proc with:
-# LD_LIBRARY_PATH=. ./dummyproc
-
 LIB_NAME=dynhooklib
 LIB_PATH=$(pwd)/$LIB_NAME.so
 PROCID=$(pgrep dummyproc | head -n 1)
