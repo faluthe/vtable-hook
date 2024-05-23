@@ -153,4 +153,8 @@ To keep this part of the guide brief, please see the [Guide to Compiling Librari
 
 ### Running the Dummy Application
 
+```bash
+LD_LIBRARY_PATH=. ./dummyproc
+```
+
 ### Dissecting the Dummy Application/Library
