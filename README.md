@@ -47,36 +47,13 @@ We'll start with the centerpiece: a class with a virtual function table (vtable)
 
 ### What is `virtual`?
 
-This guide assumes you have basic knowledge of polymorphism, vtables, and their usage. As a refresher, virtual function tables are a result of the `virtual` keyword in C++. When a function in a base class is marked with the `virtual` keyword, derrived classes may override that function. Then, at runtime when the function is called, the address of the function is resolved using the actual runtime object's type. We'll take a closer look at how this all works in a moment. For now we can think of it like this: for a base class with virtual methods there is a list of overwritable methods we can choose to overwrite when we create a derrived class. Say we have a `virtual void printType()` function in our `Shape` base class that prints "I am a Shape" to the console. We could create a new type `Square` that inherits from `Shape` and since `printType` is in the list of virtual methods we can override it and make it print "I am a Square" instead. We can see that in action here:
+This guide assumes you have basic knowledge of polymorphism, vtables, and their usage. As a refresher, please see the [What is Virtual?](docs/virtual.md) guide.
 
-```cpp
-#include <stdio.h>
+### Writing a Dummy Class
 
-struct Shape
-{
-    virtual void printType() { printf("I am a Shape\n"); }
-}
+We're going to focus less on C++ semantics and more on memory structures. I encourage you to brush up on C++ and pure virtual functions at this point.
 
-struct Square : Shape
-{
-    virtual void printType() override { printf("I am a Square\n"); }
-}
-
-void printShape(Shape& shape)
-{
-    shape.printType();
-}
-
-Square square;
-// Should print "I am a Square"
-printShape(square);
-```
-
-In this example, both `Shape` and `Square` each have vtables that are identical in structure.
-
-### Writing a dummy class
-
-Back to our application. We're going to start focusing less on C++ semantics and more on memory structures. I encourage you to brush up on C++ and pure virtual functions at this point.
+To model our application after the applications we will see in practice, we'll start by defining an interface ([What is an Interface?](docs/virtual.md/#what-is-an-interface)) and a derrived class.
 
 ```cpp
 // dummylib.hpp
@@ -106,6 +83,10 @@ int TestClass::TestMethod(int x, int y)
 }
 ```
 
+We now have our target function to hook: `TestMethod`. Notice that `TestMethod` is a virtual function, so a vtable will be generated for `TestClass`. We'll take a look at the generated vtable within the compiled library in a moment.
+
+### A Simple Factory Function
+
 Now let's use a common polymorphic technique you'll almost certainly come across in practice, a factory function! Factory functions are common to return a concrete implementation of an interface. You'll likely see something like this:
 
 ```cpp
@@ -113,4 +94,63 @@ ITestInterface *test = CreateInterface<ITestInterface>();
 test->TestMethod();
 ```
 
-The actual type of `test` doesn't really matter to the caller, we can trust `TestMethod` was implemented.
+The actual type of `test` doesn't really matter to the caller, we can trust `TestMethod` was implemented because it was defined in the interface. We'll define the factory function for our application like this:
+```cpp
+// dummylib.hpp
+
+...
+
+ITestInterface *CreateTestClass();
+```
+```cpp
+// dummylib.cpp
+
+...
+
+ITestInterface *CreateTestClass()
+{
+    return new TestClass();
+}
+```
+
+For our sample application we only need to return one derrived class of one interface, so this will do. 
+
+### The Main Dummy Application
+
+Let's finish up by creating the main part of the dummy application that calls the `TestMethod` function from `dummylib`.
+
+```cpp
+// dummyproc.cpp
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <Library/dummylib.hpp>
+
+int main()
+{
+    ITestInterface *test = CreateTestClass();
+
+    while (true)
+    {
+        test->TestMethod();
+        printf("Press any key to run TestMethod again...\n");
+        getchar();
+    }
+
+    delete test;
+
+    return 0;
+}
+```
+
+Here we call `TestMethod` any time a key is pressed, so when we are hooked we can test the hook by pressing a key.
+
+### Compiling the Dummy Application
+
+We've got two separate pieces of our application: the main process and the library. These two pieces will need to be linked together in order for the main process to resolve the `TestMethod` function. 
+
+To keep this part of the guide brief, please see the [Guide to Compiling Libraries](docs/libraries.md) for a deeper dive into C/C++ library compilation and linkage.
+
+### Running the Dummy Application
+
+### Dissecting the Dummy Application/Library
