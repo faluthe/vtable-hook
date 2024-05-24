@@ -71,7 +71,6 @@ struct TestClass : ITestInterface
 {
     virtual int TestMethod(int x, int y) override;
 };
-
 ```
 
 ```cpp
@@ -197,7 +196,7 @@ PIC addresses objects in memory by relative address, not absolute address. This 
 
 PIC is important for shared objects, because they do not know where they will be placed in memory. This is in contrast to an executable, who due to virtual memory can address absolutely. 
 
-When an executable is loaded into memory the operating system creates a virtual address space for it and assigns the executable a <u>base address</u> within the virtual address space. The executable can then use absolute addresses, the operating system will adjust the addresses based on the assigned base address, and the Memory Management Unit will translate the virtual addresses into physical addresses in RAM.
+When an executable is loaded into memory the operating system creates a <u>virtual address space</u> for it and assigns the executable a <u>base address</u> within the virtual address space. The executable can then use absolute addresses, the operating system will adjust the addresses based on the assigned base address, and the Memory Management Unit will translate the virtual addresses into physical addresses in RAM.
 
 Shared objects, however, are not loaded at a specific base address and instead loaded at any available address in the virtual address space. They must use relative addressing, which adds an offset to the instruction pointer to address objects.
 
@@ -205,8 +204,152 @@ To fully understand this, see [what the difference actually looks like in practi
 
 ### Dynamically Linking Using `dlopen` and `dlsym`
 
-Now that we've compiled our library, we need to link it with our main application. We'll do this by calling the `dlopen` function from `dlfcn.h`.
+Now that we've compiled our library, we need to link it with our main application. We'll do this by calling the `dlopen` function from `dlfcn.h`. The `dlopen` function will load the shared object into the main application's virtual address space (if not already loaded) and return a handle (pointer) to the shared object.
 
+Let's add this call to the main application:
 
+```cpp
+// dummyproc.cpp
+#include <dlfcn.h>
+...
 
-### Dissecting the Dummy Application/Library
+int main()
+{
+    void *libHandle = dlopen("./dummylib.so", RTLD_LAZY);
+    ...
+
+    return 0;
+}
+```
+
+We can use the `RTLD_LAZY` RunTime LoaDer flag, which uses lazy bindings.
+
+Okay, so we've loaded the library and we have a handle to it, but we still can't resolve the reference to `CreateTestClass`. If you try to compile after adding the call to `dlopen`, you'll recieve the same error as before. We need to use the handle to resolve the symbol.
+
+We'll do this by calling the `dlsym` function, also from `dlfcn.h`. The `dlsym` function is used to obtain the address of a symbol in a shared object. `dlsym` takes a handle and a symbol name and returns the adress of where the symbol is loaded.
+
+```cpp
+// dummyproc.cpp
+#include <dlfcn.h>
+...
+
+int main()
+{
+    void *libHandle = dlopen("./dummylib.so", RTLD_LAZY);
+    void *createTestClassPtr = dlsym(libHandle, "CreateTestClass");
+    printf("%p\n", createTestClassPtr);
+    ...
+
+    return 0;
+}
+```
+
+At this point we should expect this to work, but if you ran this code you would find it prints `(nil)`, because `dlsym` is not able to find the `CreateTestClass` symbol. Interestingly, if you were to convert this project to C instead of C++ at this point this example WOULD work (note: you'd have to dumb down `TestClass`). This is because during the compilation of C++ code <u>Name Mangling</u> occurs. C++ has to mangle symbol names due to features like function overloading and namespaces; the mangled names encode information like parameter types and namespace to create a unique symbol. C does not have these features so it does not mangle symbol names.
+
+We can read what symbols are available to us through examining a compiled binary with the `nm` command line utility. We'll use the `-D` option to analyze the data section.
+
+```bash
+pat@ubuntu:~/vtable-hook$ nm -D dummylib.so
+
+...
+
+00000000000011b6 T _Z15CreateTestClassv
+00000000000011e8 W _ZN14ITestInterfaceC1Ev
+00000000000011e8 W _ZN14ITestInterfaceC2Ev
+000000000000117a T _ZN9TestClass10TestMethodEii
+
+...
+```
+
+Here we can see the mangled name of our function, `_Z15CreateTestClassv` as well as the other symbols available to us. By default all symbols are exported, however usually developers will change this and only export a select few functions, like a factory function!
+
+Let's now change our `dlsym` call to include the mangled name.
+
+```cpp
+// dummyproc.cpp
+#include <dlfcn.h>
+...
+
+int main()
+{
+    void *libHandle = dlopen("./dummylib.so", RTLD_LAZY);
+    void *factoryPtr = dlsym(libHandle, "_Z15CreateTestClassv");
+    printf("%p\n", factoryPtr);
+    ...
+
+    return 0;
+}
+```
+
+Running this should now dynamically load `dummylib` and print the address of the `CreateTestClass` function. To call the function we can simply cast the void pointer to a function pointer:
+
+```cpp
+void *factoryPtr = dlsym(libHandle, "_Z15CreateTestClassv");
+ITestInterface *(*factory)() = (ITestInterface *(*)()) factoryPtr;
+ITestInterface *test = factory();
+```
+
+Here we define a function pointer, named `factory`, that takes no arguments and returns an `ITestInterface` pointer. We are casting `factoryPtr` from a void pointer to a function pointer that returns an `ITestInterface` pointer and takes no arguments. Again, I don't want to dive into C/C++ semantics too much.
+
+With that we have our finished application:
+
+```cpp
+// dummyproc.cpp
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "Library/dummylib.hpp"
+
+int main()
+{
+    void *libHandle = dlopen("./dummylib.so", RTLD_LAZY);
+    void *factoryPtr = dlsym(libHandle, "_Z15CreateTestClassv");
+
+    ITestInterface *(*factory)() = (ITestInterface *(*)()) factoryPtr;
+    ITestInterface *test = factory();
+
+    while (true)
+    {
+        int i = test->TestMethod(1, 2);
+        printf("TestMethod(1, 2) returned: %d\n", i);
+        printf("Press any key to run TestMethod again...\n");
+        getchar();
+    }
+
+    delete test;
+
+    return 0;
+}
+```
+
+If you have already compiled `dummylib.so` then you can compile and run the main application with:
+
+```bash
+g++ dummyproc.cpp -o dummyproc
+
+./dummyproc
+```
+
+Remember: you don't need to recompile the library and the main process if you only change one of them and it does not matter what order you compile them in.
+
+### Avoiding Name Mangling in C++
+
+We can actually avoid name mangling in C++ by adding `extern "C"` to our function prototype, which tells the compiler to use C linkage (no name mangling) for that function.
+
+```cpp
+// dummylib.hpp
+
+...
+
+extern "C" ITestInterface *CreateTestClass();
+```
+
+```cpp
+// dummyproc.cpp
+
+...
+
+void *factoryPtr = dlsym(libHandle, "CreateTestClass");
+
+...
