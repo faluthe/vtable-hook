@@ -37,7 +37,7 @@ void write_to_table(void **vtable, int index, void *func)
 
 __attribute__((constructor)) void init()
 {
-    void *handle = dlopen("/home/pat/Documents/vtable-hook/libdummy.so", RTLD_NOLOAD | RTLD_NOW);
+    void *handle = dlopen("./libdummy.so", RTLD_NOLOAD | RTLD_NOW);
     if (!handle)
     {
         printf("Failed to load libdummy.so\n");
