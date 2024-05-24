@@ -353,3 +353,14 @@ extern "C" ITestInterface *CreateTestClass();
 void *factoryPtr = dlsym(libHandle, "CreateTestClass");
 
 ...
+```
+
+Note that you have to recompile both the main process and library if you make this addition.
+
+```bash
+g++ dummyproc.cpp -o dummyproc
+
+g++ Library/dummylib.cpp -shared -fpic -o dummylib.so
+
+./dummyproc
+```
