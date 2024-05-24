@@ -4,6 +4,13 @@ LIB_NAME=dynhooklib
 LIB_PATH=$(pwd)/$LIB_NAME.so
 PROCID=$(pgrep dummyproc | head -n 1)
 
+# Check if gdb is installed
+if ! command -v gdb &> /dev/null
+then
+    echo "GDB is not installed"
+    exit 1
+fi
+
 # Verify permissions
 if [[ "$EUID" -ne 0 ]]; then
     echo "Please run as root"
@@ -47,7 +54,7 @@ trap unload SIGINT
 
 LIB_HANDLE=$(gdb -n --batch -ex "attach $PROCID" \
                             -ex "call ((void * (*) (const char *, int)) dlopen)(\"$LIB_PATH\", 1)" \
-                            -ex "detach" 2> /dev/null | grep -oP '\$1 = \(void \*\) \K0x[0-9a-f]+')
+                            -ex "detach" | grep -oP '\$1 = \(void \*\) \K0x[0-9a-f]+')
 
 if [ -z "$LIB_HANDLE" ]; then
     echo "Failed to load library"
@@ -55,5 +62,10 @@ if [ -z "$LIB_HANDLE" ]; then
 fi
 
 echo "Library loaded successfully at $LIB_HANDLE. Use Ctrl+C to unload."
+
+# Create the file if it doesn't exist
+if [ ! -e "./$LIB_NAME.log" ]; then
+    touch "./$LIB_NAME.log"
+fi
 
 tail -f ./$LIB_NAME.log
