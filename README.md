@@ -24,12 +24,11 @@ LD_LIBRARY_PATH=. ./dummyproc
 sudo bash gdb-dlopen.sh
 ```
 
-**_Start the main process. Then, from another terminal, initialize the hook._**
+*_Start the main process. Then, from another terminal, initialize the hook._*
 
-#
+# Everything You Need to Write a VTable Hook
 
-## WiP Guide
-
+We'll write a test library and a test application that calls a function from the test library. Then, we'll inject another library that hooks the function from the test library.
 
 ### Context of the hook
 We'll be putting the target function of the hook in a dummy library (dummylib), **compiled separate from the main application**. This library will be loaded dynamically at runtime by the main application. This allows developers to avoid lengthy compilation times; if you change a part of the library's code you only need to recompile the library, the main application will remain the same and resolve references to the library's code at runtime. We'll demonstrate how libraries are usually dynamically loaded through our test application and then we'll go on to use the GNU Debugger to inject a library into an already running application.
@@ -98,6 +97,7 @@ test->TestMethod();
 ```
 
 The actual type of `test` doesn't really matter to the caller, we can trust `TestMethod` was implemented because it was defined in the interface. We'll define the factory function for our application like this:
+
 ```cpp
 // dummylib.hpp
 
@@ -363,4 +363,137 @@ g++ dummyproc.cpp -o dummyproc
 g++ Library/dummylib.cpp -shared -fpic -o dummylib.so
 
 ./dummyproc
+
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
 ```
+
+### Components of the Hook
+
+Now that we've got our test application and test library fully functional, let's dive into the hook. For simplicity I'll be writing the hook in C. I'll also put it in the same directory as the test application/library, though this is not necessary.
+
+So our source directory now looks like this:
+
+```
+Main Application
+├── Library
+│   ├── dummylib.hpp
+│   └── dummylib.cpp
+└── dummyproc.cpp
+└── hook.c
+```
+
+We'll compile the hook as a library and then use the GNU Debugger to inject the shared object. So we have two components of the hook: `hook.c` and GDB. You'll notice a bash script in this repository to handle the GDB part, titled `gdb-dlopen.sh`, but we'll be [injecting the library](#injecting-the-library) manually in this guide. 
+
+### GNU C Attributes
+
+GNU C attributes are used to add additional information about variables, functions, or types to the GNU Compiler. Attributes are specified using the `__attribute__` keyword followed by double parentheses enclosing an attribute.
+
+Attributes like
+
+```c
+int old_function() __attribute__((deprecated));
+```
+will generate warning if the function or variable is used.
+
+We'll be using two attributes in `hook.c`: 
+
+```c
+__attribute__((constructor))
+
+__attribute__((destructor))
+```
+Functions marked with `constructor` and `destructor` will run before and after the `main` function respectively. In the context of libraries, since they do not have a `main` function, they are used to initalize library resources and perform any needed setup. We'll set up our hook in the constructor and restore it in the destructor.
+
+To get up and running let's write a simple hello world:
+
+```c
+#include <stdio.h>
+
+__attribute__((constructor)) void init()
+{
+    printf("Hello world!\n");
+}
+
+__attribute__((destructor)) void unload()
+{
+    printf("Goodbye world!\n");
+}
+```
+
+We can compile this the exact same [way we compiled `dummylib.cpp`](#compiling-dummylibcpp-as-a-dynamic-library), this time using `gcc` instead of `g++`:
+
+```bash
+gcc hook.c -shared -fpic -o hook.so
+```
+
+### Injecting the Library
+
+You should probably have some familarity with GDB at this point but it is not strictly necessary.
+
+First, launch the `dummyproc` and ensure it is operational.
+
+```bash
+./dummyproc
+```
+
+Then, from another terminal, we'll attach GDB to the running `dummyproc`. We can do this a couple of ways: launch `gdb` with the `--pid=1234` option or by using the `attach 1234` command in the GDB terminal. Both methods require a process ID, which we can obtain using the `pgrep dummyproc` command. I'll attach with:
+
+```bash
+gdb --pid=$(pgrep dummyproc)
+```
+
+Loading the library is actually really simple, we just call `dlopen`!
+
+```bash
+(gdb) call dlopen("./hook.so", 1)
+$1 = (void *) 0x55f084a56860
+```
+
+Remember, `dlopen` takes a path to a shared object and a flag variable and returns a handle to the loaded library. Here the flag is set to 1/`RTLD_LAZY`.
+
+Switch back to the terminal running `dummyproc`:
+```bash
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+Hello world!
+```
+
+Our library is loaded! We can unload from `gdb` using `dlclose` and the handle that was previously returned by `dlopen`:
+
+```bash
+(gdb) call dlopen("./hook.so", 1)
+$1 = (void *) 0x55f084a56860
+(gdb) call dlclose((void *) 0x55f084a56860)
+$2 = 0
+```
+
+```
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+Hello world!
+Goodbye world!
+```
+
+### Caveats
+
+At this point, an intuitive programmer may find themselves asking, "Would this work if we had not imported `dlfcn.h` in `dummyproc.cpp?`" The answer is YES! We've only imported `dlopen` and `dlsym` in `dummyproc.cpp` to demonstrate how libraries are usually loaded. Calling `dlopen` from GDB is possible for most applications, even those who have not explicitly imported `dlfcn.h`.
+
+[Read more on this](/docs/libraries.md) to understand why it works.
+
+You may also need to cast `dlopen` when calling it. Read more on that [here](/docs/libraries.md)
+
+### Getting a Pointer to CreateTestClass
+
+Use RTLD_NOLOAD
+
+### Getting the Address of the Virtual Function Table
+
+Deref obj pointer
+
+### Page Protection and Writing to The VTable
+
+### Restoring the Hook
