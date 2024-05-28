@@ -206,6 +206,8 @@ To fully understand this, see [what the difference actually looks like in practi
 
 Now that we've compiled our library, we need to link it with our main application. We'll do this by calling the `dlopen` function from `dlfcn.h`. The `dlopen` function will load the shared object into the main application's virtual address space (if not already loaded) and return a handle (pointer) to the shared object.
 
+Note: throughout this guide **I won't be checking return values**. Read the [`dlopen` man page](https://man7.org/linux/man-pages/man3/dlopen.3.html) to learn what these functions return upon error.
+
 Let's add this call to the main application:
 
 ```cpp
@@ -409,6 +411,7 @@ Functions marked with `constructor` and `destructor` will run before and after t
 To get up and running let's write a simple hello world:
 
 ```c
+// hook.c
 #include <stdio.h>
 
 __attribute__((constructor)) void init()
@@ -484,15 +487,101 @@ At this point, an intuitive programmer may find themselves asking, "Would this w
 
 [Read more on this](/docs/libraries.md) to understand why it works.
 
-You may also need to cast `dlopen` when calling it. Read more on that [here](/docs/libraries.md)
+IMPORTANT: **You may also need to cast `dlopen` when calling it!!** Meaning you may need to call it from `gdb` with:
+
+```bash
+call ((void * (*) (const char *, int)) dlopen)("$LIB_PATH", 1)
+```
+ 
+I strongly suggest you read more on that [here](/docs/libraries.md).
 
 ### Getting a Pointer to CreateTestClass
 
-Use RTLD_NOLOAD
+At this point we've got a pretty good grasp on dynamic libraries. We'll get a pointer to the `CreateTestClass` function in `hook.c` through the same process as the [Dynamically Linking Using `dlopen` and `dlsym`](#dynamically-linking-using-dlopen-and-dlsym) section.
+
+Here's how we did it in `dummyproc.cpp`:
+
+```cpp
+// dummyproc.cpp
+...
+
+#include "Library/dummylib.hpp"
+
+int main()
+{
+    void *libHandle = dlopen("./dummylib.so", RTLD_LAZY);
+    void *factoryPtr = dlsym(libHandle, "CreateTestClass");
+
+    ITestInterface *(*factory)() = (ITestInterface *(*)()) factoryPtr;
+    ITestInterface *test = factory();
+
+    ...
+
+```
+
+We'll do the same thing in `hook.c`, with a couple of modifications:
+
+```c
+// hook.c
+#include <dlfcn.h>
+
+__attribute__((constructor)) void init()
+{
+    void *lib_handle = dlopen("./dummylib.so", RTLD_NOLOAD | RTLD_LAZY);
+    void *(*factory)() = dlsym(lib_handle, "CreateTestClass");
+    void *test = factory();
+    printf("test: %p\n", test);
+}
+
+...
+```
+
+```md
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+test: 0x557a7d1f3d80
+```
+
+Firstly, we're getting a handle to `dummylib.so` with the `RTLD_NOLOAD` flag as well as `RTLD_LAZY`. Recall from the [Dynamically Linking Using `dlopen` and `dlsym`](#dynamically-linking-using-dlopen-and-dlsym) section that the `dlopen` function will <u>load the shared object into the main application's virtual address space (if not already loaded)</u> and return a handle (pointer) to the shared object. By using `RTLD_NOLOAD` we signal `dlopen` to NOT load the library and to only return a handle if it is already open. In a real world application here's where you would check that the application has already properly loaded the library you desire instead of potentially loading it an incorrect time. 
+
+Secondly, we've avoided the extra `factoryPtr` step and casted the result of `dlsym` directly. You'll also notice that the return value of the `factory` function in `hook.c` is no longer an `ITestInterface *`, instead it just a `void *`. This is because in a real world application we likely wouldn't have access to `dummylib.hpp`, if we wanted to use a class from the application  we would have to reverse that class manually and reconstruct it. We'll only be using pointers from the test application, so `void *` will suffice. The only thing we care about is the size of the pointer; generally all pointers are the same size: 4 bytes in a 32-bit application and 8 bytes in a 64-bit application, with an exception being near offsets which you'll often see in [Platform Independent Code](#platform-independent-code).
 
 ### Getting the Address of the Virtual Function Table
 
-Deref obj pointer
+So, now `hook.c` is able to get a pointer, returned from `CreateTestClass`. Let's remind ourselves what that function returns:
+
+```cpp
+ITestInterface *CreateTestClass()
+{
+    return new TestClass();
+}
+```
+
+The function returns a pointer to a `TestClass` somewhere on the heap. We printed out the address of this pointer (0x557a7d1f3d80) in the last section. Let's take a look at that address in GDB:
+
+```md
+pat@ubuntu:~/vtable-hook$ sudo gdb --pid=$(pgrep dummyproc)
+
+...
+
+(gdb) x/5a 0x557a7d1f3d80
+0x557a7d1f3d80: 0x7f8d77e63db8  0x0
+0x557a7d1f3d90: 0xa9321658      0x1a1
+0x557a7d1f3da0: 0x7f8d77e51e70
+```
+
+Here we examine (`x`) 5 addresses (`a`), starting at 0x557a7d1f3d80. Remember, that address is a pointer so the value at that address is another address: 0x7f8d77e63db8. The rest we can ignore, I've printed out 5 for no reason in particular. Let's examine 0x7f8d77e63db8, aka the `TestClass`:
+
+```md
+
+(gdb) x/5a 0x7f8d77e63db8
+0x7f8d77e63db8: 0x7f8d77e6117a  0x0
+0x7f8d77e63dc8: 0x7f8d77e63df0  0x7f8d77ab1f80
+0x7f8d77e63dd8: 0x7f8d77c20c30
+```
+
+For the purposes of this section I'm going to add a few extra members to `TestClass` and then recompile:
 
 ### Page Protection and Writing to The VTable
 
