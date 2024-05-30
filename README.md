@@ -540,7 +540,7 @@ __attribute__((constructor)) void init()
 x: 1, y: 2
 TestMethod(1, 2) returned: 3
 Press any key to run TestMethod again...
-test: 0x557a7d1f3d80
+test: 0x55ca0d616b90
 ```
 
 Firstly, we're getting a handle to `dummylib.so` with the `RTLD_NOLOAD` flag as well as `RTLD_LAZY`. Recall from the [Dynamically Linking Using `dlopen` and `dlsym`](#dynamically-linking-using-dlopen-and-dlsym) section that the `dlopen` function will <u>load the shared object into the main application's virtual address space (if not already loaded)</u> and return a handle (pointer) to the shared object. By using `RTLD_NOLOAD` we signal `dlopen` to NOT load the library and to only return a handle if it is already open. In a real world application here's where you would check that the application has already properly loaded the library you desire instead of potentially loading it an incorrect time. 
@@ -558,30 +558,73 @@ ITestInterface *CreateTestClass()
 }
 ```
 
-The function returns a pointer to a `TestClass` somewhere on the heap. We printed out the address of this pointer (0x557a7d1f3d80) in the last section. Let's take a look at that address in GDB:
+The function returns a pointer to <u>an instance of `TestClass`</u> somewhere on the heap. We printed out the value stored at this pointer (0x55ca0d616b90) in the last section. We'll take a look at that address in GDB in a moment.
+
+For the purposes of this section I'm going to add a few members to `TestClass`:
+
+```cpp
+// dummylib.hpp
+
+...
+
+struct TestClass : ITestInterface
+{
+    virtual int TestMethod(int x, int y) override;
+    virtual void TestMethod2() override;
+    virtual void TestMethod3() override;
+
+    int m_x;
+    int m_y;
+
+    bool TestMethod4();
+
+    TestClass()
+    {
+        m_x = 0x2024;
+        m_y = 0x1337;
+    }
+};
+
+...
+```
+
+Now let's analyze the <u>instance</u> of `TestClass`, at 0x55ca0d616b90:
 
 ```md
 pat@ubuntu:~/vtable-hook$ sudo gdb --pid=$(pgrep dummyproc)
 
 ...
 
-(gdb) x/5a 0x557a7d1f3d80
-0x557a7d1f3d80: 0x7f8d77e63db8  0x0
-0x557a7d1f3d90: 0xa9321658      0x1a1
-0x557a7d1f3da0: 0x7f8d77e51e70
+(gdb) x/10xg 0x55ca0d616b90
+0x55ca0d616b90: 0x00007ff2e305dd98      0x0000133700002024
+0x55ca0d616ba0: 0x00007ff2e2c90968      0x0000000000000031
+0x55ca0d616bb0: 0x000055ca0d616bc8      0x0000000000000000
+0x55ca0d616bc0: 0x00007ff200000000      0x6c796d6d75642f2e
+0x55ca0d616bd0: 0x0000006f732e6269      0x00000000000001e1
 ```
 
-Here we examine (`x`) 5 addresses (`a`), starting at 0x557a7d1f3d80. Remember, that address is a pointer so the value at that address is another address: 0x7f8d77e63db8. The rest we can ignore, I've printed out 5 for no reason in particular. Let's examine 0x7f8d77e63db8, aka the `TestClass`:
+We've used the examine (`x`) GDB command, asking for 10 addresses, in hexidecimal (`x`) format, with giant word/8 byte sized (`g`) structure. To analyze 10 word/4 byte sized strucutres in hexidecimal format use `x/10xw address`.
+
+Notice the 0x2024 and 0x1337 values are present, each are 4 bytes in size and since we are analyzing giant words (8 bytes) they are combined into a single output. You'll also notice the next 8 bytes after the 0x1337 and 0x2024 value's is an address, which we can assume to be the address of `TestMethod4`. 
+
+A trained eye may also notice the first member of the structure is also an address. All <u>instances</u> of C++ classes containing virtual functions contain a hidden pointer, the `vptr`, that points to the VTable! This pointer will be located at the base address of the structure.
+
+While there may be many instances of a class, there is only one VTable.
+
+Let's examine the address stored in the `vptr`:
 
 ```md
-
-(gdb) x/5a 0x7f8d77e63db8
-0x7f8d77e63db8: 0x7f8d77e6117a  0x0
-0x7f8d77e63dc8: 0x7f8d77e63df0  0x7f8d77ab1f80
-0x7f8d77e63dd8: 0x7f8d77c20c30
+(gdb) x/10a 0x7ff2e305dd98
+0x7ff2e305dd98: 0x7ff2e305b19a      0x7ff2e305b1d4
+0x7ff2e305dda8: 0x7ff2e305b1f4      0x0
+0x7ff2e305ddb8: 0x7ff2e305ddf0      0x7ff2e2d19120
+0x7ff2e305ddc8: 0x7ff2e2d19120      0x7ff2e2d19120
+0x7ff2e305ddd8: 0x7ff2e2e41c98      0x7ff2e305c038
 ```
 
-For the purposes of this section I'm going to add a few extra members to `TestClass` and then recompile:
+Here we are examing 10 addresses (`a`) which are 8 bytes (with leading 0's truncated).
+
+Generally, the end of a structure in memory is marked with a null pointer (`0x0`). You can see this here at 0x7ff2e305ddb0 and in the `TestClass` structure at 0x55ca0d616bb8. Before the null/end marker we can see 3 addresses, our VTable!
 
 ### Page Protection and Writing to The VTable
 
