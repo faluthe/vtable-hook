@@ -560,7 +560,7 @@ ITestInterface *CreateTestClass()
 
 The function returns a pointer to <u>an instance of `TestClass`</u> somewhere on the heap. We printed out the value stored at this pointer (0x55ca0d616b90) in the last section. We'll take a look at that address in GDB in a moment.
 
-For the purposes of this section I'm going to add a few members to `TestClass`:
+For the purposes of this section I'm going to add a few members to `TestClass`. **You don't necassarily need to do this**, these members make no difference in hooking `TestMethod`.
 
 ```cpp
 // dummylib.hpp
@@ -624,8 +624,126 @@ Let's examine the address stored in the `vptr`:
 
 Here we are examing 10 addresses (`a`) which are 8 bytes (with leading 0's truncated).
 
-Generally, the end of a structure in memory is marked with a null pointer (`0x0`). You can see this here at 0x7ff2e305ddb0 and in the `TestClass` structure at 0x55ca0d616bb8. Before the null/end marker we can see 3 addresses, our VTable!
+Generally, the end of a structure in memory is marked with a null pointer (`0x0`). You can see this in the output above at 0x7ff2e305ddb0 and in the `TestClass` structure at 0x55ca0d616bb8. Before the null/end marker in the output above we can see 3 addresses, this is our VTable! 
+
+`0x7ff2e305b19a`,`0x7ff2e305b1d4`, and `0x7ff2e305b1f4`, correspond to `TestMethod`, `TestMethod2`, and `TestMethod3` respectively.
+
+We can even confirm this by looking at `TestMethod2` in memory. I've defined `TestMethod2` as:
+
+```cpp
+int TestClass::TestMethod2()
+{
+    return 5;
+}
+```
+
+And here's `TestMethod2` at `0x7ff2e305b1d4`:
+
+```md
+(gdb) x/10i 0x7ff2e305b1d4
+0x7ff2e305b1d4: endbr64
+0x7ff2e305b1d8: push   %rbp
+0x7ff2e305b1d9: mov    %rsp,%rbp
+0x7ff2e305b1db: mov    %rdi,-0x8(%rbp)
+0x7ff2e305b1df: mov    $0x5,%eax
+0x7ff2e305b1e4: pop    %rbp
+0x7ff2e305b1e5: ret    
+0x7ff2e305b1e6: nop    
+0x7ff2e305b1e7: endbr64
+0x7ff2e305b1eb: push   %rbp
+```
+
+At `0x7ff2e305b1df`, the integer value 5 is loaded into the `eax` register, the register used to return integers and pointers from functions.
+
+We should have everything we need to translate this to code in `hook.c`:
+
+```c
+// hook.c
+
+...
+
+__attribute__((constructor)) void init()
+{
+    void *lib_handle = dlopen("./dummylib.so", RTLD_NOLOAD | RTLD_LAZY);
+    void *(*factory)() = dlsym(lib_handle, "CreateTestClass");
+    void *test = factory();
+    
+    void **vtable = *(void ***)test;
+    void *test_method = vtable[0];
+    void *test_method2 = vtable[1];
+    printf("TestMethod2: %p\n", test_method2);
+}
+
+...
+
+```
+
+We can treat the VTable as a list (pointer) of generic (void) pointers, hence `void **vtable`. We also know the first 8 bytes of `test` (`test` + 0) is a pointer to the vtable, so we cast it to a pointer to a list of pointers `(void ***)`.
+
+Close `dummyproc` if you have it open, recompile `hook.c`, open `dummyproc`, and reinject `hook.so`.
+
+```md
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+TestMethod2: 0x7ff2e305b1d4
+```
+
+Note this address likely won't be the same as before if you've reopened `dummyproc`.
 
 ### Page Protection and Writing to The VTable
+
+The actual hook is probably simpler than you think:
+
+```c
+// hook.c
+...
+
+int test_hook(void *, int x, int y)
+{
+    printf("Hello from the hook! x: %d, y: %d\n", x, y);
+}
+
+__attribute__((constructor)) void init()
+{
+
+    ...
+
+    vtable[0] = test_hook;
+}
+```
+
+We just set the first index in the vtable to point to `test_hook` instead of `TestMethod`! We must ensure that the hook function has the same prototype as `TestMethod` and have to include the `this` pointer in the hook function's prototype, hence the addition of the nameless `void *` parameter.
+
+Of course it's not actually that easy. If you were to run this code you would recieve a segmentation fault as soon you write to the VTable. This is due to **page protection**.
+
+Virtual memory is divided into pages and the operating system maintains a mapping of virtual pages to physical pages. If we print out the address of the VTable again, this time a new address, we can check what page the VTable is on and if we can read/write to that page. 
+
+```md
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+vtable: 0x7f3d2913ad78
+```
+
+We'll check what page `0x7f3d2913ad78` is on using `GDB`:
+
+```md
+(gdb) info proc mappings
+process 80964
+Mapped address spaces:
+
+          Start Addr           End Addr       Size     Offset  Perms  objfile
+      0x55f9430aa000     0x55f9430ab000     0x1000        0x0  r--p   ...
+
+      ...
+
+      0x7f3d29139000     0x7f3d2913a000     0x1000     0x2000  r--p   ...
+      0x7f3d2913a000     0x7f3d2913b000     0x1000     0x2000  r--p   ...
+      0x7f3d2913b000     0x7f3d2913c000     0x1000     0x3000  rw-p   ...
+      0x7f3d2913c000     0x7f3d2913e000     0x2000        0x0  rw-p
+```
+
+`0x7f3d2913ad78` is on the `0x7f3d2913a000` - `0x7f3d2913b000` page which has `r--` (read-only) permissions. To write to the VTable we'll need to change the permissions on this page.
 
 ### Restoring the Hook
