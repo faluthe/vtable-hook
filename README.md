@@ -5,17 +5,17 @@
 #### Compile with
 
 ```bash
-g++ dummylib/dummylib.cpp -shared -fpic -o libdummy.so -std=c++17
+g++ Library/dummylib.cpp -shared -fpic -o dummylib.so -std=c++17
 
-g++ dummyproc.cpp -L. -ldummy -o dummyproc -std=c++17
+g++ dummyproc.cpp -ldl -o dummyproc -std=c++17
 
-gcc dynhooklib.c -shared -fpic -o dynhooklib.so
+gcc hook.c -shared -fpic -o hook.so
 ```
 
 #### Run the main process with
 
 ```bash
-LD_LIBRARY_PATH=. ./dummyproc
+./dummyproc
 ```
 
 #### Load the hook with
@@ -492,6 +492,8 @@ IMPORTANT: **You may also need to cast `dlopen` when calling it!!** Meaning you 
 ```bash
 call ((void * (*) (const char *, int)) dlopen)("$LIB_PATH", 1)
 ```
+
+IMPORTANT: **You may need to link using -ldl** to use `dlopen`.
  
 I strongly suggest you read more on that [here](/docs/libraries.md).
 
@@ -746,4 +748,153 @@ Mapped address spaces:
 
 `0x7f3d2913ad78` is on the `0x7f3d2913a000` - `0x7f3d2913b000` page which has `r--` (read-only) permissions. To write to the VTable we'll need to change the permissions on this page.
 
+We can change page permissions using the `mprotect` function from `sys/mman.h`. According to the [the `mprotect` man page](https://man7.org/linux/man-pages/man2/mprotect.2.html), the function takes the starting address of the page, the size of the page, and the new permissions.
+
+```c
+int mprotect(void *addr, size_t len, int prot);
+```
+
+We'll need to calculate the starting address of the page dynamically; the VTable won't always be `0xd78` away from the start of the page, but we do know that the page is `0x1000` (4096 bytes) in size. This means we can round down to the nearest `0x1000` to get the start of the page.
+
+I recommend you brush up on your bitwise operations at this point. We'll be using this formula:
+
+```md
+(VTable Address) & ~((Page Size) - 1)
+```
+
+We'll bitwise AND the VTable address with size of the page minus one. It works like this:
+
+```md
+1.
+              4096                     4095
+0x0000000000001000 - 1 = 0x0000000000000fff
+
+2.
+
+NOT( 0x0000000000000fff ) = 0xfffffffffffff000
+
+3.
+
+AND( 0x00007f3d2913ad78 ,
+     0xfffffffffffff000 )
+=    0x00007f3d2913a000     
+
+```
+
+We should have what we need to put it into `hook.c`:
+
+```c
+// hook.c
+
+...
+
+#include <sys/mman.h>
+#include <unistd.h>
+
+int test_hook(void *, int x, int y)
+{
+    printf("Hello from the hook! x: %d, y: %d\n", x, y);
+}
+
+__attribute__((constructor)) void init()
+{
+    void *lib_handle = dlopen("./dummylib.so", RTLD_NOLOAD | RTLD_LAZY);
+    void *(*factory)() = dlsym(lib_handle, "CreateTestClass");
+    void *test = factory();
+
+    void **vtable = *(void ***)test;
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    void *page_start = (void *)((__uint64_t)vtable & ~(page_size - 1));
+    printf("page_start = %p\n", page_start);
+
+    mprotect(page_start, page_size, PROT_READ | PROT_WRITE);
+    vtable[0] = test_hook;
+    mprotect(page_start, page_size, PROT_READ);
+}
+
+...
+```
+
+We can use `sysconf` from `unistd.h` to safely get the page size (4096). We must cast the vtable to an integer type (of the same size) in order to do arithmetic on it. To be safe we also restore the original read-only permissions back to the page after we've written to it.
+
+```md
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+page_start = 0x7f7c60829000
+
+
+Hello from the hook! x: 1, y: 2
+TestMethod(1, 2) returned: 0
+Press any key to run TestMethod again...
+```
+
+We are officially hooked! Don't forget to `continue` in GDB before running `TestMethod` again.
+
 ### Restoring the Hook
+
+Recall from the [GNU C Attributes](#gnu-c-attributes) section that code marked with `__attribute__((destructor))` will execute upon the closing of the shared object. We'll use this to write back the original address of the `TestMethod` function to the VTable.
+
+Our final `hook.c`:
+
+```c
+// hook.c
+
+#include <dlfcn.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+int (*original_func)(void *, int, int) = NULL;
+void **vtable = NULL;
+long page_size = 0;
+void *page_start = NULL;
+
+int test_hook(void * this, int x, int y)
+{
+    printf("Hello from the hook! x: %d, y: %d\n", x, y);
+
+    return 0;
+}
+
+__attribute__((constructor)) void init()
+{
+    void *lib_handle = dlopen("./dummylib.so", RTLD_NOLOAD | RTLD_LAZY);
+    void *(*factory)() = dlsym(lib_handle, "CreateTestClass");
+    void *test = factory();
+
+    vtable = *(void ***)test;
+    original_func = vtable[0];
+
+    page_size = sysconf(_SC_PAGESIZE);
+    page_start = (void *)((__uint64_t)vtable & ~(page_size - 1));
+
+    mprotect(page_start, page_size, PROT_READ | PROT_WRITE);
+    vtable[0] = test_hook;
+    mprotect(page_start, page_size, PROT_READ);
+}
+
+__attribute__((destructor)) void unload()
+{
+    mprotect(page_start, page_size, PROT_READ | PROT_WRITE);
+    vtable[0] = original_func;
+    mprotect(page_start, page_size, PROT_READ);
+}
+```
+
+Remember, we can unload the shared object with `dlclose`. See the [Injecting The Library](#injecting-the-library) section for more.
+
+```md
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+                                        <--- INJECTED HERE
+Hello from the hook! x: 1, y: 2
+TestMethod(1, 2) returned: 0
+Press any key to run TestMethod again...
+                                        <--- CALLED dlclose HERE
+x: 1, y: 2
+TestMethod(1, 2) returned: 3
+Press any key to run TestMethod again...
+```

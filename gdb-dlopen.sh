@@ -1,6 +1,6 @@
 #!/bin/bash
 
-LIB_NAME=dynhooklib
+LIB_NAME=hook
 LIB_PATH=$(pwd)/$LIB_NAME.so
 PROCID=$(pgrep dummyproc | head -n 1)
 

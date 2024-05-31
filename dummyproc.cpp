@@ -1,31 +1,39 @@
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "dummylib/dummylib.hpp"
+#include "Library/dummylib.hpp"
 
 int main()
 {
-    ITestInterface *test = CreateTestClass();
-    auto dstruct = new DummyStruct{1, 2};
+    void *libHandle = dlopen("/home/pleb/test-vtable-hook/dummylib.so", RTLD_LAZY);
 
-    test->TestMethod();
+    if (!libHandle)
+    {
+        fprintf(stderr, "Failed to load library: %s\n", dlerror());
+        return 1;
+    }
 
-    printf("test->TestMethod2(1, 2): %d\n", test->TestMethod2(1, 2));
+    void *factoryPtr = dlsym(libHandle, "CreateTestClass");
 
-    printf("test->TestHookMe(1.0f, {1, 2}): %s\n", test->TestHookMe(1.0f, dstruct) ? "true" : "false");
+    if (!factoryPtr)
+    {
+        fprintf(stderr, "Failed to find factory function: %s\n", dlerror());
+        return 1;
+    }
 
-    test->TestMethod3();
+    ITestInterface *(*factory)() = (ITestInterface *(*)()) factoryPtr;
+    ITestInterface *test = factory();
 
     while (true)
     {
-        printf("Press any key to run TestHookMe again...\n");
+        int i = test->TestMethod(1, 2);
+        printf("TestMethod(1, 2) returned: %d\n", i);
+        printf("Press any key to run TestMethod again...\n");
         getchar();
-
-        printf("test->TestHookMe(1.0f, {1, 2}): %s\n", test->TestHookMe(1.0f, dstruct) ? "true" : "false");
     }
 
     delete test;
-    delete dstruct;
 
     return 0;
 }
