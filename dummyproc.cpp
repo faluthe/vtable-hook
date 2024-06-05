@@ -6,7 +6,7 @@
 
 int main()
 {
-    void *libHandle = dlopen("/home/pleb/test-vtable-hook/dummylib.so", RTLD_LAZY);
+    void *libHandle = dlopen("./dummylib.so", RTLD_LAZY);
 
     if (!libHandle)
     {
