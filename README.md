@@ -704,6 +704,8 @@ The actual hook is probably simpler than you think:
 int test_hook(void *, int x, int y)
 {
     printf("Hello from the hook! x: %d, y: %d\n", x, y);
+
+    return 3;
 }
 
 __attribute__((constructor)) void init()
